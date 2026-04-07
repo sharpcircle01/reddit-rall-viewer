@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Reddit r/all Viewer",
+  "version": "1.0.0",
+  "description": "Brings back r/all access on Reddit with a handy popup viewer and navigation button.",
+  "permissions": [],
+  "host_permissions": [
+    "https://www.reddit.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.reddit.com/*", "https://old.reddit.com/*", "https://sh.reddit.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
