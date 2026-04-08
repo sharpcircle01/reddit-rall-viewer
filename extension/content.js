@@ -1,5 +1,4 @@
-// Content script: Injects r/all feed directly into the Reddit page,
-// bypassing Reddit's redirect/suppression of /r/all.
+// Content script: Injects r/all feed with slide-in post viewer
 
 (function () {
   'use strict';
@@ -9,6 +8,8 @@
   let afterToken = null;
   let isLoading = false;
   let postCount = 0;
+  let currentSort = 'hot';
+  let feedScrollPos = 0;
 
   // ── Helpers ──
 
@@ -43,7 +44,6 @@
     if (post.preview && post.preview.images && post.preview.images[0]) {
       const resolutions = post.preview.images[0].resolutions;
       if (resolutions && resolutions.length > 0) {
-        // Grab the largest available resolution for big cards
         const good = resolutions.find(r => r.width >= 600) || resolutions[resolutions.length - 1];
         return decodeHTML(good.url);
       }
@@ -53,6 +53,16 @@
       return post.thumbnail;
     }
     return null;
+  }
+
+  function getFullImage(post) {
+    if (post.preview && post.preview.images && post.preview.images[0]) {
+      return decodeHTML(post.preview.images[0].source.url);
+    }
+    if (post.url && /\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(post.url)) {
+      return post.url;
+    }
+    return getThumb(post);
   }
 
   function getPostText(post) {
@@ -73,20 +83,29 @@
     return 'link';
   }
 
-  // ── Fetch r/all ──
+  // Simple markdown-ish rendering for selftext
+  function renderSelfText(text) {
+    if (!text) return '';
+    let html = escapeHTML(text);
+    // Paragraphs
+    html = html.split('\n\n').map(p => `<p>${p.trim()}</p>`).join('');
+    // Single newlines
+    html = html.replace(/\n/g, '<br>');
+    return html;
+  }
 
-  async function fetchRAll(fresh = false) {
+  // ── Fetch helpers ──
+
+  async function fetchRAllWithSort(sort, fresh) {
     if (isLoading) return [];
     isLoading = true;
     if (fresh) afterToken = null;
 
     try {
-      let url = `https://www.reddit.com/r/all/hot.json?limit=25&raw_json=1`;
+      let url = `https://www.reddit.com/r/all/${sort}.json?limit=25&raw_json=1`;
       if (afterToken) url += `&after=${afterToken}`;
-
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
       const data = await res.json();
       afterToken = data.data.after;
       return data.data.children.map(c => c.data);
@@ -98,7 +117,22 @@
     }
   }
 
-  // ── Build a post card ──
+  async function fetchPostAndComments(permalink) {
+    try {
+      const url = `https://www.reddit.com${permalink}.json?raw_json=1&limit=100`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const postData = data[0].data.children[0].data;
+      const commentsData = data[1].data.children;
+      return { post: postData, comments: commentsData };
+    } catch (err) {
+      console.error('[r/all Extension] Post fetch error:', err);
+      return null;
+    }
+  }
+
+  // ── Build feed post card ──
 
   function buildPostHTML(post, rank) {
     const thumb = getThumb(post);
@@ -107,35 +141,29 @@
     const postType = getPostType(post);
     const selfText = getPostText(post);
 
-    // Type badge
     const typeBadges = {
-      video: '▶ Video',
-      image: '🖼 Image',
-      gallery: '📷 Gallery',
-      link: '🔗 Link',
-      text: '📝 Text'
+      video: '▶ Video', image: '🖼 Image', gallery: '📷 Gallery',
+      link: '🔗 Link', text: '📝 Text'
     };
     const typeBadge = `<span class="rall-post-type rall-post-type--${postType}">${typeBadges[postType] || ''}</span>`;
 
-    // Large image block (if available)
     const imageHTML = thumb
       ? `<div class="rall-post-image"><img src="${thumb}" alt="" loading="lazy"></div>`
       : '';
 
-    // Self text preview (for text posts)
     const textPreviewHTML = (!thumb && selfText)
       ? `<div class="rall-post-preview">${selfText}</div>`
       : (thumb && selfText)
         ? `<div class="rall-post-preview rall-post-preview--short">${escapeHTML(decodeHTML(post.selftext.substring(0, 150)))}${post.selftext.length > 150 ? '...' : ''}</div>`
         : '';
 
-    // External link display
     const domain = post.domain && !post.domain.startsWith('self.') && !post.domain.startsWith('i.redd') && !post.domain.startsWith('v.redd')
       ? `<span class="rall-post-domain">${post.domain}</span>`
       : '';
 
+    // data-permalink for the click handler
     return `
-      <a href="https://www.reddit.com${post.permalink}" class="rall-post" target="_blank" rel="noopener">
+      <div class="rall-post" data-permalink="${post.permalink}">
         <div class="rall-post-header">
           <span class="rall-post-rank">#${rank}</span>
           <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
@@ -151,8 +179,176 @@
           <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
           <span class="rall-post-comments">💬 ${formatScore(post.num_comments)}</span>
         </div>
-      </a>
+      </div>
     `;
+  }
+
+  // ── Build comment HTML (recursive for threading) ──
+
+  function buildCommentHTML(comment, depth) {
+    if (comment.kind !== 't1') return '';
+    const c = comment.data;
+    if (!c.body) return '';
+
+    const maxDepth = 6;
+    const indent = Math.min(depth, maxDepth);
+    const bodyHTML = renderSelfText(c.body);
+
+    let repliesHTML = '';
+    if (c.replies && c.replies.data && c.replies.data.children) {
+      repliesHTML = c.replies.data.children
+        .map(child => buildCommentHTML(child, depth + 1))
+        .join('');
+    }
+
+    return `
+      <div class="rall-comment" style="margin-left: ${indent * 16}px !important;">
+        <div class="rall-comment-header">
+          <span class="rall-comment-author">u/${escapeHTML(c.author)}</span>
+          <span class="rall-comment-score">▲ ${formatScore(c.score)}</span>
+          <span class="rall-comment-time">${timeAgo(c.created_utc)}</span>
+        </div>
+        <div class="rall-comment-body">${bodyHTML}</div>
+        ${repliesHTML}
+      </div>
+    `;
+  }
+
+  // ── Post detail panel ──
+
+  function createDetailPanel() {
+    if (document.getElementById('rall-detail-panel')) {
+      return document.getElementById('rall-detail-panel');
+    }
+
+    const panel = document.createElement('div');
+    panel.id = 'rall-detail-panel';
+    panel.innerHTML = `
+      <div class="rall-detail-header">
+        <button id="rall-detail-back" class="rall-detail-back">← Back to feed</button>
+        <a id="rall-detail-reddit-link" class="rall-detail-reddit-link" href="#" target="_blank" rel="noopener">Open on Reddit ↗</a>
+      </div>
+      <div id="rall-detail-content" class="rall-detail-content"></div>
+    `;
+
+    document.getElementById('rall-overlay').appendChild(panel);
+
+    document.getElementById('rall-detail-back').addEventListener('click', closeDetailPanel);
+
+    return panel;
+  }
+
+  async function openDetailPanel(permalink) {
+    const panel = createDetailPanel();
+    const content = document.getElementById('rall-detail-content');
+    const redditLink = document.getElementById('rall-detail-reddit-link');
+
+    redditLink.href = `https://www.reddit.com${permalink}`;
+
+    // Save scroll position of feed
+    const feed = document.getElementById('rall-feed');
+    if (feed) feedScrollPos = feed.scrollTop;
+
+    // Show panel, hide feed
+    panel.style.display = 'flex';
+    feed.style.display = 'none';
+    document.getElementById('rall-load-more-wrap').style.display = 'none';
+
+    // Loading state
+    content.innerHTML = '<div class="rall-loading"><div class="rall-spinner"></div><span>Loading post...</span></div>';
+
+    // Fetch post + comments
+    const result = await fetchPostAndComments(permalink);
+    if (!result) {
+      content.innerHTML = '<div class="rall-loading">⚠️ Failed to load post.</div>';
+      return;
+    }
+
+    const { post, comments } = result;
+    const fullImage = getFullImage(post);
+    const title = escapeHTML(decodeHTML(post.title));
+    const nsfwTag = post.over_18 ? `<span class="rall-nsfw">NSFW</span> ` : '';
+
+    // Post image
+    const imageHTML = fullImage
+      ? `<div class="rall-detail-image"><img src="${fullImage}" alt="" loading="lazy"></div>`
+      : '';
+
+    // Self text (full)
+    const selfTextHTML = post.selftext
+      ? `<div class="rall-detail-selftext">${renderSelfText(post.selftext)}</div>`
+      : '';
+
+    // Video embed
+    let videoHTML = '';
+    if (post.is_video && post.media && post.media.reddit_video) {
+      const videoUrl = post.media.reddit_video.fallback_url;
+      videoHTML = `<div class="rall-detail-video"><video controls preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video></div>`;
+    }
+
+    // External link
+    const isExternal = post.domain && !post.domain.startsWith('self.') && !post.domain.startsWith('i.redd') && !post.domain.startsWith('v.redd') && !post.domain.startsWith('reddit');
+    const externalLinkHTML = isExternal
+      ? `<div class="rall-detail-link"><a href="${escapeHTML(post.url)}" target="_blank" rel="noopener">🔗 ${escapeHTML(post.domain)} ↗</a></div>`
+      : '';
+
+    // Comments
+    const commentsHTML = comments
+      .filter(c => c.kind === 't1')
+      .map(c => buildCommentHTML(c, 0))
+      .join('');
+
+    content.innerHTML = `
+      <div class="rall-detail-post">
+        <div class="rall-detail-post-meta">
+          <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
+          <span class="rall-post-author">u/${escapeHTML(post.author)}</span>
+          <span class="rall-post-time">${timeAgo(post.created_utc)}</span>
+        </div>
+        <div class="rall-detail-title">${nsfwTag}${title}</div>
+        ${imageHTML}
+        ${videoHTML}
+        ${selfTextHTML}
+        ${externalLinkHTML}
+        <div class="rall-detail-stats">
+          <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
+          <span class="rall-post-comments">💬 ${formatScore(post.num_comments)} comments</span>
+        </div>
+      </div>
+      <div class="rall-detail-comments-header">Comments</div>
+      <div class="rall-detail-comments">
+        ${commentsHTML || '<div class="rall-no-comments">No comments yet.</div>'}
+      </div>
+    `;
+
+    content.scrollTop = 0;
+  }
+
+  function closeDetailPanel() {
+    const panel = document.getElementById('rall-detail-panel');
+    const feed = document.getElementById('rall-feed');
+    const loadMore = document.getElementById('rall-load-more-wrap');
+
+    if (panel) panel.style.display = 'none';
+    if (feed) {
+      feed.style.display = 'block';
+      feed.scrollTop = feedScrollPos;
+    }
+    if (loadMore && afterToken) loadMore.style.display = 'block';
+  }
+
+  // ── Click handler for posts ──
+
+  function handlePostClick(e) {
+    const postEl = e.target.closest('.rall-post');
+    if (!postEl) return;
+
+    const permalink = postEl.getAttribute('data-permalink');
+    if (!permalink) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    openDetailPanel(permalink);
   }
 
   // ── Overlay ──
@@ -196,19 +392,24 @@
       await showOverlay();
     });
 
+    // Delegate click handler for posts
+    document.getElementById('rall-feed').addEventListener('click', handlePostClick);
+
     return overlay;
   }
-
-  let currentSort = 'hot';
 
   async function showOverlay() {
     const overlay = createOverlay();
     const feed = document.getElementById('rall-feed');
+    feed.style.display = 'block';
     feed.innerHTML = '<div class="rall-loading"><div class="rall-spinner"></div><span>Loading r/all…</span></div>';
     overlay.style.display = 'flex';
     document.getElementById('rall-load-more-wrap').style.display = 'none';
 
-    // Hide the real Reddit feed
+    // Hide detail panel if open
+    const detail = document.getElementById('rall-detail-panel');
+    if (detail) detail.style.display = 'none';
+
     const mainContent = findMainFeed();
     if (mainContent && !savedHomeFeed) {
       savedHomeFeed = { el: mainContent, display: mainContent.style.display };
@@ -220,7 +421,6 @@
     afterToken = null;
     updateFABState();
 
-    // Update the fetch URL with current sort
     const posts = await fetchRAllWithSort(currentSort, true);
     if (posts === null) {
       feed.innerHTML = '<div class="rall-loading">⚠️ Failed to load r/all. Try again later.</div>';
@@ -237,30 +437,7 @@
       document.getElementById('rall-load-more-wrap').style.display = 'block';
     }
 
-    overlay.scrollTop = 0;
-  }
-
-  async function fetchRAllWithSort(sort, fresh) {
-    if (isLoading) return [];
-    isLoading = true;
-    if (fresh) afterToken = null;
-
-    try {
-      let url = `https://www.reddit.com/r/all/${sort}.json?limit=25&raw_json=1`;
-      if (afterToken) url += `&after=${afterToken}`;
-
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = await res.json();
-      afterToken = data.data.after;
-      return data.data.children.map(c => c.data);
-    } catch (err) {
-      console.error('[r/all Extension] Fetch error:', err);
-      return null;
-    } finally {
-      isLoading = false;
-    }
+    feed.scrollTop = 0;
   }
 
   async function loadMore() {
@@ -322,7 +499,7 @@
     if (!fab) return;
     if (isShowingAll) {
       fab.classList.add('rall-fab-active');
-      fab.title = 'Showing r/all — click to go back';
+      fab.title = 'Showing r/all -- click to go back';
     } else {
       fab.classList.remove('rall-fab-active');
       fab.title = 'Show r/all';
@@ -365,7 +542,6 @@
     init();
   }
 
-  // Handle SPA navigation
   let lastUrl = location.href;
   const observer = new MutationObserver(() => {
     if (location.href !== lastUrl) {
