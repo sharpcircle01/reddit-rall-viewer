@@ -249,6 +249,9 @@
     const feed = document.getElementById('rall-feed');
     if (feed) feedScrollPos = feed.scrollTop;
 
+    // Push a history state so the mouse back button closes the panel
+    history.pushState({ rallDetail: true }, '');
+
     // Show panel, hide feed
     panel.style.display = 'flex';
     feed.style.display = 'none';
@@ -541,6 +544,14 @@
   } else {
     init();
   }
+
+  // Mouse back button support: close detail panel on popstate
+  window.addEventListener('popstate', (e) => {
+    const panel = document.getElementById('rall-detail-panel');
+    if (panel && panel.style.display !== 'none') {
+      closeDetailPanel();
+    }
+  });
 
   let lastUrl = location.href;
   const observer = new MutationObserver(() => {
