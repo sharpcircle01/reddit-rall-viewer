@@ -239,7 +239,6 @@
 #rall-overlay .rall-post-image {
   display: block !important;
   width: 100% !important;
-  max-height: 500px !important;
   overflow: hidden !important;
   background: #1c2126 !important;
   line-height: 0 !important;
@@ -249,8 +248,9 @@
   display: block !important;
   width: 100% !important;
   height: auto !important;
-  max-height: 500px !important;
-  object-fit: cover !important;
+  max-height: 700px !important;
+  object-fit: contain !important;
+  background: #0e1113 !important;
   border: none !important;
   outline: none !important;
 }
