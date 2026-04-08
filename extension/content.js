@@ -135,7 +135,7 @@
       : '';
 
     return `
-      <a href="https://www.reddit.com${post.permalink}" class="rall-post">
+      <a href="https://www.reddit.com${post.permalink}" class="rall-post" target="_blank" rel="noopener">
         <div class="rall-post-header">
           <span class="rall-post-rank">#${rank}</span>
           <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
