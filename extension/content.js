@@ -43,7 +43,8 @@
     if (post.preview && post.preview.images && post.preview.images[0]) {
       const resolutions = post.preview.images[0].resolutions;
       if (resolutions && resolutions.length > 0) {
-        const good = resolutions.find(r => r.width >= 200) || resolutions[resolutions.length - 1];
+        // Grab the largest available resolution for big cards
+        const good = resolutions.find(r => r.width >= 600) || resolutions[resolutions.length - 1];
         return decodeHTML(good.url);
       }
       return decodeHTML(post.preview.images[0].source.url);
@@ -52,6 +53,24 @@
       return post.thumbnail;
     }
     return null;
+  }
+
+  function getPostText(post) {
+    if (post.selftext && post.selftext.length > 0) {
+      const clean = escapeHTML(post.selftext.substring(0, 300));
+      return clean + (post.selftext.length > 300 ? '...' : '');
+    }
+    return null;
+  }
+
+  function getPostType(post) {
+    if (post.is_video) return 'video';
+    if (post.post_hint === 'image') return 'image';
+    if (post.post_hint === 'hosted:video' || post.post_hint === 'rich:video') return 'video';
+    if (post.is_gallery) return 'gallery';
+    if (post.post_hint === 'link') return 'link';
+    if (post.selftext && post.selftext.length > 0) return 'text';
+    return 'link';
   }
 
   // ── Fetch r/all ──
@@ -85,23 +104,52 @@
     const thumb = getThumb(post);
     const title = escapeHTML(decodeHTML(post.title));
     const nsfwTag = post.over_18 ? `<span class="rall-nsfw">NSFW</span> ` : '';
-    const thumbHTML = thumb
-      ? `<div class="rall-post-thumb"><img src="${thumb}" alt="" loading="lazy"></div>`
+    const postType = getPostType(post);
+    const selfText = getPostText(post);
+
+    // Type badge
+    const typeBadges = {
+      video: '▶ Video',
+      image: '🖼 Image',
+      gallery: '📷 Gallery',
+      link: '🔗 Link',
+      text: '📝 Text'
+    };
+    const typeBadge = `<span class="rall-post-type rall-post-type--${postType}">${typeBadges[postType] || ''}</span>`;
+
+    // Large image block (if available)
+    const imageHTML = thumb
+      ? `<div class="rall-post-image"><img src="${thumb}" alt="" loading="lazy"></div>`
+      : '';
+
+    // Self text preview (for text posts)
+    const textPreviewHTML = (!thumb && selfText)
+      ? `<div class="rall-post-preview">${selfText}</div>`
+      : (thumb && selfText)
+        ? `<div class="rall-post-preview rall-post-preview--short">${escapeHTML(decodeHTML(post.selftext.substring(0, 150)))}${post.selftext.length > 150 ? '...' : ''}</div>`
+        : '';
+
+    // External link display
+    const domain = post.domain && !post.domain.startsWith('self.') && !post.domain.startsWith('i.redd') && !post.domain.startsWith('v.redd')
+      ? `<span class="rall-post-domain">${post.domain}</span>`
       : '';
 
     return `
       <a href="https://www.reddit.com${post.permalink}" class="rall-post">
-        <div class="rall-post-rank">${rank}</div>
-        ${thumbHTML}
-        <div class="rall-post-body">
-          <div class="rall-post-title">${nsfwTag}${title}</div>
-          <div class="rall-post-meta">
-            <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
-            <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
-            <span class="rall-post-comments">💬 ${formatScore(post.num_comments)}</span>
-            <span class="rall-post-time">${timeAgo(post.created_utc)}</span>
-            <span class="rall-post-author">u/${post.author}</span>
-          </div>
+        <div class="rall-post-header">
+          <span class="rall-post-rank">#${rank}</span>
+          <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
+          <span class="rall-post-author">u/${post.author}</span>
+          <span class="rall-post-time">${timeAgo(post.created_utc)}</span>
+          ${domain}
+        </div>
+        <div class="rall-post-title">${nsfwTag}${title}</div>
+        ${imageHTML}
+        ${textPreviewHTML}
+        <div class="rall-post-footer">
+          ${typeBadge}
+          <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
+          <span class="rall-post-comments">💬 ${formatScore(post.num_comments)}</span>
         </div>
       </a>
     `;
