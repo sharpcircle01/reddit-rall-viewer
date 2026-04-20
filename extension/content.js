@@ -11,6 +11,60 @@
   let currentSort = 'hot';
   let feedScrollPos = 0;
 
+  // ── Auth state ──
+  let redditUser = null;  // { name, modhash }
+  let authChecked = false;
+
+  async function checkAuth() {
+    if (authChecked) return redditUser;
+    try {
+      const res = await fetch('https://www.reddit.com/api/me.json', { credentials: 'include' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data && data.data && data.data.name) {
+        redditUser = { name: data.data.name, modhash: data.data.modhash };
+      }
+    } catch (err) {
+      console.error('[r/all Extension] Auth check error:', err);
+    }
+    authChecked = true;
+    return redditUser;
+  }
+
+  async function redditVote(fullname, dir) {
+    if (!redditUser) return false;
+    try {
+      const res = await fetch('https://www.reddit.com/api/vote', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `id=${fullname}&dir=${dir}&uh=${redditUser.modhash}`
+      });
+      return res.ok;
+    } catch (err) {
+      console.error('[r/all Extension] Vote error:', err);
+      return false;
+    }
+  }
+
+  async function redditComment(parentFullname, text) {
+    if (!redditUser) return null;
+    try {
+      const res = await fetch('https://www.reddit.com/api/comment', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `thing_id=${parentFullname}&text=${encodeURIComponent(text)}&uh=${redditUser.modhash}&api_type=json`
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error('[r/all Extension] Comment error:', err);
+      return null;
+    }
+  }
+
   // ── Helpers ──
 
   function timeAgo(utcSeconds) {
@@ -161,9 +215,12 @@
       ? `<span class="rall-post-domain">${post.domain}</span>`
       : '';
 
+    // Determine current vote state from post data
+    const voteState = post.likes === true ? 'up' : post.likes === false ? 'down' : 'none';
+
     // data-permalink for the click handler
     return `
-      <div class="rall-post" data-permalink="${post.permalink}">
+      <div class="rall-post" data-permalink="${post.permalink}" data-fullname="t3_${post.id}">
         <div class="rall-post-header">
           <span class="rall-post-rank">#${rank}</span>
           <span class="rall-post-sub">${post.subreddit_name_prefixed}</span>
@@ -176,7 +233,11 @@
         ${textPreviewHTML}
         <div class="rall-post-footer">
           ${typeBadge}
-          <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
+          <div class="rall-vote-group" data-fullname="t3_${post.id}">
+            <button class="rall-vote-btn rall-vote-up${voteState === 'up' ? ' rall-voted' : ''}" data-dir="1" title="Upvote">▲</button>
+            <span class="rall-post-score">${formatScore(post.score)}</span>
+            <button class="rall-vote-btn rall-vote-down${voteState === 'down' ? ' rall-voted' : ''}" data-dir="-1" title="Downvote">▼</button>
+          </div>
           <span class="rall-post-comments">💬 ${formatScore(post.num_comments)}</span>
         </div>
       </div>
@@ -193,6 +254,7 @@
     const maxDepth = 6;
     const indent = Math.min(depth, maxDepth);
     const bodyHTML = renderSelfText(c.body);
+    const commentVoteState = c.likes === true ? 'up' : c.likes === false ? 'down' : 'none';
 
     let repliesHTML = '';
     if (c.replies && c.replies.data && c.replies.data.children) {
@@ -202,13 +264,25 @@
     }
 
     return `
-      <div class="rall-comment" style="margin-left: ${indent * 16}px !important;">
+      <div class="rall-comment" style="margin-left: ${indent * 16}px !important;" data-fullname="t1_${c.id}">
         <div class="rall-comment-header">
           <span class="rall-comment-author">u/${escapeHTML(c.author)}</span>
-          <span class="rall-comment-score">▲ ${formatScore(c.score)}</span>
+          <div class="rall-vote-group rall-vote-group--inline" data-fullname="t1_${c.id}">
+            <button class="rall-vote-btn rall-vote-up${commentVoteState === 'up' ? ' rall-voted' : ''}" data-dir="1" title="Upvote">▲</button>
+            <span class="rall-comment-score">${formatScore(c.score)}</span>
+            <button class="rall-vote-btn rall-vote-down${commentVoteState === 'down' ? ' rall-voted' : ''}" data-dir="-1" title="Downvote">▼</button>
+          </div>
           <span class="rall-comment-time">${timeAgo(c.created_utc)}</span>
+          <button class="rall-reply-toggle" data-fullname="t1_${c.id}">Reply</button>
         </div>
         <div class="rall-comment-body">${bodyHTML}</div>
+        <div class="rall-reply-box" id="rall-reply-${c.id}" style="display:none !important;">
+          <textarea class="rall-reply-textarea" placeholder="Write a reply..." rows="3"></textarea>
+          <div class="rall-reply-actions">
+            <button class="rall-reply-submit" data-fullname="t1_${c.id}">Submit</button>
+            <button class="rall-reply-cancel" data-fullname="t1_${c.id}">Cancel</button>
+          </div>
+        </div>
         ${repliesHTML}
       </div>
     `;
@@ -317,6 +391,17 @@
       .map(c => buildCommentHTML(c, 0))
       .join('');
 
+    // Post vote state
+    const detailVoteState = post.likes === true ? 'up' : post.likes === false ? 'down' : 'none';
+    const loggedInCommentBox = redditUser ? `
+      <div class="rall-add-comment">
+        <div class="rall-add-comment-label">Comment as u/${escapeHTML(redditUser.name)}</div>
+        <textarea class="rall-comment-textarea" id="rall-new-comment" placeholder="What are your thoughts?" rows="4"></textarea>
+        <div class="rall-reply-actions">
+          <button class="rall-reply-submit" id="rall-submit-comment" data-fullname="t3_${post.id}">Comment</button>
+        </div>
+      </div>` : `<div class="rall-login-prompt">Log in to Reddit to vote and comment</div>`;
+
     content.innerHTML = `
       <div class="rall-detail-post">
         <div class="rall-detail-post-meta">
@@ -330,10 +415,15 @@
         ${selfTextHTML}
         ${externalLinkHTML}
         <div class="rall-detail-stats">
-          <span class="rall-post-score">▲ ${formatScore(post.score)}</span>
+          <div class="rall-vote-group" data-fullname="t3_${post.id}">
+            <button class="rall-vote-btn rall-vote-up${detailVoteState === 'up' ? ' rall-voted' : ''}" data-dir="1" title="Upvote">▲</button>
+            <span class="rall-post-score">${formatScore(post.score)}</span>
+            <button class="rall-vote-btn rall-vote-down${detailVoteState === 'down' ? ' rall-voted' : ''}" data-dir="-1" title="Downvote">▼</button>
+          </div>
           <span class="rall-post-comments">💬 ${formatScore(post.num_comments)} comments</span>
         </div>
       </div>
+      ${loggedInCommentBox}
       <div class="rall-detail-comments-header">Comments</div>
       <div class="rall-detail-comments">
         ${commentsHTML || '<div class="rall-no-comments">No comments yet.</div>'}
@@ -411,6 +501,9 @@
   // ── Click handler for posts ──
 
   function handlePostClick(e) {
+    // Don't open post if clicking a vote button, reply button, textarea, or action button
+    if (e.target.closest('.rall-vote-btn, .rall-reply-toggle, .rall-reply-box, .rall-vote-group, .rall-add-comment')) return;
+
     const postEl = e.target.closest('.rall-post');
     if (!postEl) return;
 
@@ -420,6 +513,143 @@
     e.preventDefault();
     e.stopPropagation();
     openDetailPanel(permalink);
+  }
+
+  // ── Vote handler (delegated) ──
+
+  async function handleVoteClick(e) {
+    const btn = e.target.closest('.rall-vote-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!redditUser) {
+      alert('You need to be logged in to Reddit to vote.');
+      return;
+    }
+
+    const group = btn.closest('.rall-vote-group');
+    if (!group) return;
+    const fullname = group.getAttribute('data-fullname');
+    const dir = parseInt(btn.getAttribute('data-dir'));
+
+    // Toggle: if already voted this way, unvote (dir=0)
+    const isAlreadyVoted = btn.classList.contains('rall-voted');
+    const actualDir = isAlreadyVoted ? 0 : dir;
+
+    // Optimistic UI update
+    group.querySelectorAll('.rall-vote-btn').forEach(b => b.classList.remove('rall-voted'));
+    if (!isAlreadyVoted) btn.classList.add('rall-voted');
+
+    const success = await redditVote(fullname, actualDir);
+    if (!success) {
+      // Revert on failure
+      btn.classList.toggle('rall-voted');
+    }
+  }
+
+  // ── Reply toggle handler ──
+
+  function handleReplyToggle(e) {
+    const btn = e.target.closest('.rall-reply-toggle');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!redditUser) {
+      alert('You need to be logged in to Reddit to reply.');
+      return;
+    }
+
+    const fullname = btn.getAttribute('data-fullname');
+    const id = fullname.replace('t1_', '');
+    const replyBox = document.getElementById('rall-reply-' + id);
+    if (replyBox) {
+      replyBox.style.display = replyBox.style.display === 'none' ? 'block' : 'none';
+      if (replyBox.style.display === 'block') {
+        replyBox.querySelector('textarea').focus();
+      }
+    }
+  }
+
+  // ── Reply submit handler ──
+
+  async function handleReplySubmit(e) {
+    const btn = e.target.closest('.rall-reply-submit');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const fullname = btn.getAttribute('data-fullname');
+    const replyBox = btn.closest('.rall-reply-box') || btn.closest('.rall-add-comment');
+    const textarea = replyBox ? replyBox.querySelector('textarea') : null;
+    if (!textarea || !textarea.value.trim()) return;
+
+    const text = textarea.value.trim();
+    btn.textContent = 'Submitting...';
+    btn.disabled = true;
+
+    const result = await redditComment(fullname, text);
+    if (result && result.json && result.json.data && result.json.data.things && result.json.data.things.length > 0) {
+      const newComment = result.json.data.things[0].data;
+      // Insert the new comment into the DOM
+      const newCommentHTML = `
+        <div class="rall-comment rall-comment-new" style="margin-left: 0px !important;" data-fullname="t1_${newComment.id}">
+          <div class="rall-comment-header">
+            <span class="rall-comment-author">u/${escapeHTML(newComment.author)}</span>
+            <div class="rall-vote-group rall-vote-group--inline" data-fullname="t1_${newComment.id}">
+              <button class="rall-vote-btn rall-vote-up rall-voted" data-dir="1" title="Upvote">▲</button>
+              <span class="rall-comment-score">1</span>
+              <button class="rall-vote-btn rall-vote-down" data-dir="-1" title="Downvote">▼</button>
+            </div>
+            <span class="rall-comment-time">just now</span>
+          </div>
+          <div class="rall-comment-body">${renderSelfText(newComment.body)}</div>
+        </div>
+      `;
+
+      // If this is a top-level comment, insert before the comments section
+      if (fullname.startsWith('t3_')) {
+        const commentsDiv = document.querySelector('#rall-detail-content .rall-detail-comments');
+        if (commentsDiv) {
+          const noComments = commentsDiv.querySelector('.rall-no-comments');
+          if (noComments) noComments.remove();
+          commentsDiv.insertAdjacentHTML('afterbegin', newCommentHTML);
+        }
+      } else {
+        // Reply to a comment -- insert after the reply box
+        const parentComment = btn.closest('.rall-comment');
+        if (parentComment) {
+          parentComment.insertAdjacentHTML('beforeend', newCommentHTML);
+        }
+      }
+
+      textarea.value = '';
+      // Hide reply box for comment replies
+      if (fullname.startsWith('t1_')) {
+        const box = btn.closest('.rall-reply-box');
+        if (box) box.style.display = 'none';
+      }
+    } else {
+      alert('Failed to submit comment. Please try again.');
+    }
+
+    btn.textContent = fullname.startsWith('t3_') ? 'Comment' : 'Submit';
+    btn.disabled = false;
+  }
+
+  // ── Reply cancel handler ──
+
+  function handleReplyCancel(e) {
+    const btn = e.target.closest('.rall-reply-cancel');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const box = btn.closest('.rall-reply-box');
+    if (box) {
+      box.querySelector('textarea').value = '';
+      box.style.display = 'none';
+    }
   }
 
   // ── Overlay ──
@@ -466,6 +696,14 @@
     // Delegate click handler for posts
     document.getElementById('rall-feed').addEventListener('click', handlePostClick);
 
+    // Delegate all interactive handlers on the entire overlay
+    overlay.addEventListener('click', (e) => {
+      if (e.target.closest('.rall-vote-btn')) { handleVoteClick(e); return; }
+      if (e.target.closest('.rall-reply-toggle')) { handleReplyToggle(e); return; }
+      if (e.target.closest('.rall-reply-submit') || e.target.closest('#rall-submit-comment')) { handleReplySubmit(e); return; }
+      if (e.target.closest('.rall-reply-cancel')) { handleReplyCancel(e); return; }
+    });
+
     return overlay;
   }
 
@@ -476,6 +714,9 @@
     feed.innerHTML = '<div class="rall-loading"><div class="rall-spinner"></div><span>Loading r/all…</span></div>';
     overlay.style.display = 'flex';
     document.getElementById('rall-load-more-wrap').style.display = 'none';
+
+    // Check auth in background (non-blocking for feed display)
+    checkAuth();
 
     // Hide detail panel if open
     const detail = document.getElementById('rall-detail-panel');
