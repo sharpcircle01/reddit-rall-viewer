@@ -272,8 +272,12 @@
     const title = escapeHTML(decodeHTML(post.title));
     const nsfwTag = post.over_18 ? `<span class="rall-nsfw">NSFW</span> ` : '';
 
-    // Post image
-    const imageHTML = fullImage
+    // Detect if this is a video/gif post
+    const isVideo = post.is_video && post.media && post.media.reddit_video;
+    const isRedditGif = isVideo && post.media.reddit_video.is_gif;
+
+    // Post image -- skip for video posts to avoid duplicate thumbnail
+    const imageHTML = (fullImage && !isVideo)
       ? `<div class="rall-detail-image"><img src="${fullImage}" alt="" loading="lazy"></div>`
       : '';
 
@@ -282,11 +286,26 @@
       ? `<div class="rall-detail-selftext">${renderSelfText(post.selftext)}</div>`
       : '';
 
-    // Video embed
+    // Video embed with audio sync for non-gif Reddit videos
     let videoHTML = '';
-    if (post.is_video && post.media && post.media.reddit_video) {
-      const videoUrl = post.media.reddit_video.fallback_url;
-      videoHTML = `<div class="rall-detail-video"><video controls preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video></div>`;
+    if (isVideo) {
+      const rv = post.media.reddit_video;
+      const videoUrl = rv.fallback_url;
+      // Build audio URL from the video base path
+      const audioUrl = videoUrl.replace(/\/DASH_\d+\.mp4.*|\/DASH_\d+.*/, '/DASH_AUDIO_128.mp4');
+      const videoId = 'rall-vid-' + Math.random().toString(36).slice(2, 8);
+
+      if (isRedditGif) {
+        // GIFs: loop, muted, no audio track exists
+        videoHTML = `<div class="rall-detail-video"><video controls loop muted preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video></div>`;
+      } else {
+        // Real videos: sync a hidden audio element for sound
+        videoHTML = `
+          <div class="rall-detail-video">
+            <video id="${videoId}" controls preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video>
+            <audio id="${videoId}-audio" preload="metadata" src="${audioUrl}"></audio>
+          </div>`;
+      }
     }
 
     // External link
@@ -324,6 +343,25 @@
       </div>
     `;
 
+    // Wire up audio sync for video posts with sound
+    if (isVideo && !isRedditGif) {
+      const videoId = content.querySelector('video[id^="rall-vid-"]');
+      if (videoId) {
+        const vid = videoId;
+        const aud = document.getElementById(vid.id + '-audio');
+        if (aud) {
+          let hasAudio = true;
+          aud.addEventListener('error', () => { hasAudio = false; });
+          vid.addEventListener('play', () => { if (hasAudio) { aud.currentTime = vid.currentTime; aud.play().catch(() => {}); } });
+          vid.addEventListener('pause', () => { aud.pause(); });
+          vid.addEventListener('seeked', () => { aud.currentTime = vid.currentTime; });
+          vid.addEventListener('volumechange', () => { aud.volume = vid.volume; aud.muted = vid.muted; });
+          vid.addEventListener('ratechange', () => { aud.playbackRate = vid.playbackRate; });
+          vid.addEventListener('timeupdate', () => { if (hasAudio && Math.abs(vid.currentTime - aud.currentTime) > 0.3) { aud.currentTime = vid.currentTime; } });
+        }
+      }
+    }
+
     content.scrollTop = 0;
   }
 
@@ -331,6 +369,11 @@
     const panel = document.getElementById('rall-detail-panel');
     const feed = document.getElementById('rall-feed');
     const loadMore = document.getElementById('rall-load-more-wrap');
+
+    // Pause any playing video/audio
+    if (panel) {
+      panel.querySelectorAll('video, audio').forEach(el => { el.pause(); });
+    }
 
     if (panel) panel.style.display = 'none';
     if (feed) {

@@ -511,6 +511,10 @@
   margin-bottom: 16px !important;
 }
 
+#rall-overlay .rall-detail-video audio {
+  display: none !important;
+}
+
 #rall-overlay .rall-detail-selftext {
   display: block !important;
   font-size: 15px !important;
