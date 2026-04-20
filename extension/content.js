@@ -291,19 +291,16 @@
     if (isVideo) {
       const rv = post.media.reddit_video;
       const videoUrl = rv.fallback_url;
-      // Build audio URL from the video base path
-      const audioUrl = videoUrl.replace(/\/DASH_\d+\.mp4.*|\/DASH_\d+.*/, '/DASH_AUDIO_128.mp4');
       const videoId = 'rall-vid-' + Math.random().toString(36).slice(2, 8);
 
       if (isRedditGif) {
         // GIFs: loop, muted, no audio track exists
         videoHTML = `<div class="rall-detail-video"><video controls loop muted preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video></div>`;
       } else {
-        // Real videos: sync a hidden audio element for sound
+        // Real videos: render video now, audio will be loaded via JS below
         videoHTML = `
           <div class="rall-detail-video">
             <video id="${videoId}" controls preload="metadata" src="${videoUrl}" style="width:100% !important; max-height:500px !important; border-radius:8px !important;"></video>
-            <audio id="${videoId}-audio" preload="metadata" src="${audioUrl}"></audio>
           </div>`;
       }
     }
@@ -345,19 +342,47 @@
 
     // Wire up audio sync for video posts with sound
     if (isVideo && !isRedditGif) {
-      const videoId = content.querySelector('video[id^="rall-vid-"]');
-      if (videoId) {
-        const vid = videoId;
-        const aud = document.getElementById(vid.id + '-audio');
-        if (aud) {
-          let hasAudio = true;
-          aud.addEventListener('error', () => { hasAudio = false; });
-          vid.addEventListener('play', () => { if (hasAudio) { aud.currentTime = vid.currentTime; aud.play().catch(() => {}); } });
-          vid.addEventListener('pause', () => { aud.pause(); });
-          vid.addEventListener('seeked', () => { aud.currentTime = vid.currentTime; });
-          vid.addEventListener('volumechange', () => { aud.volume = vid.volume; aud.muted = vid.muted; });
-          vid.addEventListener('ratechange', () => { aud.playbackRate = vid.playbackRate; });
-          vid.addEventListener('timeupdate', () => { if (hasAudio && Math.abs(vid.currentTime - aud.currentTime) > 0.3) { aud.currentTime = vid.currentTime; } });
+      const vid = content.querySelector('video[id^="rall-vid-"]');
+      if (vid) {
+        const videoUrl = post.media.reddit_video.fallback_url;
+        // Extract base URL: https://v.redd.it/{id}/
+        const baseMatch = videoUrl.match(/(https?:\/\/v\.redd\.it\/[^/]+\/)/);
+        if (baseMatch) {
+          const baseUrl = baseMatch[1];
+          // Try audio URLs in order: CMAF (current), DASH (legacy), bare /audio (oldest)
+          const audioCandidates = [
+            baseUrl + 'CMAF_AUDIO_128.mp4',
+            baseUrl + 'CMAF_AUDIO_64.mp4',
+            baseUrl + 'DASH_AUDIO_128.mp4',
+            baseUrl + 'DASH_AUDIO_64.mp4',
+            baseUrl + 'audio'
+          ];
+
+          // Try each candidate until one works
+          (async function tryAudio() {
+            let workingUrl = null;
+            for (const url of audioCandidates) {
+              try {
+                const resp = await fetch(url, { method: 'HEAD' });
+                if (resp.ok) { workingUrl = url; break; }
+              } catch (e) { /* try next */ }
+            }
+            if (!workingUrl) return; // No audio track available
+
+            const aud = document.createElement('audio');
+            aud.preload = 'metadata';
+            aud.src = workingUrl;
+            vid.parentElement.appendChild(aud);
+
+            vid.addEventListener('play', () => { aud.currentTime = vid.currentTime; aud.play().catch(() => {}); });
+            vid.addEventListener('pause', () => { aud.pause(); });
+            vid.addEventListener('seeked', () => { aud.currentTime = vid.currentTime; });
+            vid.addEventListener('volumechange', () => { aud.volume = vid.volume; aud.muted = vid.muted; });
+            vid.addEventListener('ratechange', () => { aud.playbackRate = vid.playbackRate; });
+            vid.addEventListener('timeupdate', () => {
+              if (Math.abs(vid.currentTime - aud.currentTime) > 0.3) { aud.currentTime = vid.currentTime; }
+            });
+          })();
         }
       }
     }
