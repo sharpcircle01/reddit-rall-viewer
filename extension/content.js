@@ -158,7 +158,7 @@
     try {
       let url = `https://www.reddit.com/r/all/${sort}.json?limit=25&raw_json=1`;
       if (afterToken) url += `&after=${afterToken}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { credentials: 'include' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       afterToken = data.data.after;
@@ -174,7 +174,7 @@
   async function fetchPostAndComments(permalink) {
     try {
       const url = `https://www.reddit.com${permalink}.json?raw_json=1&limit=100`;
-      const res = await fetch(url);
+      const res = await fetch(url, { credentials: 'include' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const postData = data[0].data.children[0].data;

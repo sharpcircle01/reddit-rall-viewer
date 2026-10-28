@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Reddit r/all Viewer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Brings back r/all access on Reddit with a handy popup viewer and navigation button.",
   "permissions": [],
   "host_permissions": [
